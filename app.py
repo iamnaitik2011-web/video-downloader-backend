@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import yt_dlp
+import re
 
 app = Flask(__name__)
 CORS(app)
@@ -15,14 +16,11 @@ def download():
     if not url:
         return jsonify({'error': 'URL missing'}), 400
 
-    # Format ko flexible banaya taaki har tarah ke Pinterest/Insta formats pick ho sakein
     ydl_opts = {
-        'format': 'bestvideo*+bestaudio/best',
+        'format': 'best',
         'quiet': True,
         'no_warnings': True,
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
+        'extract_flat': False,
     }
 
     try:
@@ -31,17 +29,27 @@ def download():
             
             video_url = info.get('url')
 
-            # Agar direct url na mile toh formats list me se best direct mp4/stream dhoondo
+            # Agar direct url na mile toh formats me se search karein
             if not video_url and 'formats' in info:
                 for f in reversed(info['formats']):
-                    if f.get('url') and (f.get('vcodec') != 'none' or f.get('ext') == 'mp4'):
+                    if f.get('url'):
                         video_url = f.get('url')
-                        break
+                        # Direct MP4 milte hi break
+                        if '.mp4' in video_url:
+                            break
+
+            # Agar URL m3u8 (HLS) nikla, toh Pinterest ka direct MP4 link banayein
+            if video_url and '.m3u8' in video_url:
+                # Pinterest hls URL ko direct 720p mp4 URL me convert karna:
+                # /hls/.../xxx_720w.m3u8 -> /exp/.../xxx_720w.mp4
+                mp4_url = re.sub(r'/hls/', '/exp/', video_url)
+                mp4_url = re.sub(r'\.m3u8$', '.mp4', mp4_url)
+                video_url = mp4_url
 
             if video_url:
                 return jsonify({'download_url': video_url})
             else:
-                return jsonify({'error': 'Format not supported'}), 404
+                return jsonify({'error': 'Video stream nahi mili'}), 404
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
