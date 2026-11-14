@@ -11,28 +11,24 @@ CORS(app)
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.pinterest.com/"
+    "Accept-Language": "en-US,en;q=0.9"
 }
 
 def resolve_pinterest(url):
     session = requests.Session()
     try:
-        resp = session.get(url, allow_redirects=True, timeout=15, headers=HEADERS)
+        resp = session.get(url, allow_redirects=True, timeout=15, headers={**HEADERS, "Referer": "https://www.pinterest.com/"})
         final_url = resp.url
         html = resp.text
 
-        # Method 1: Unescape slashes and search all pinimg mp4 URLs
         clean_html = html.replace('\\/', '/')
         mp4_links = re.findall(r'https://v[0-9a-z]*\.pinimg\.com/videos/[^"\'\s<>]+\.mp4', clean_html)
         if mp4_links:
-            # Prefer 720p / highest quality mp4
             for link in mp4_links:
                 if '720p' in link or '1080p' in link:
                     return final_url, link
             return final_url, mp4_links[0]
 
-        # Method 2: Extract Pin ID and call Pinterest PinResource API
         pin_match = re.search(r'/pin/(\d+)', final_url)
         if pin_match:
             pin_id = pin_match.group(1)
@@ -47,6 +43,55 @@ def resolve_pinterest(url):
     except Exception:
         return url, None
 
+def resolve_instagram(url):
+    # Clean tracking query parameters (?igsh=...)
+    clean_url = url.split('?')[0].rstrip('/')
+    shortcode_match = re.search(r'/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)', clean_url)
+    if not shortcode_match:
+        return None
+
+    shortcode = shortcode_match.group(1)
+    session = requests.Session()
+
+    # Method 1: Instagram Embed Captioned Page (works without login on cloud IPs)
+    try:
+        embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
+        resp = session.get(embed_url, timeout=15, headers={
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9"
+        })
+        text = resp.text.replace('\\/', '/').replace('\\u0026', '&')
+        video_matches = re.findall(r'"video_url":"(https://[^"]+\.mp4[^"]*)"', text)
+        if video_matches:
+            return video_matches[0]
+    except Exception:
+        pass
+
+    # Method 2: Instagram Public GraphQL Endpoint
+    try:
+        graphql_url = "https://www.instagram.com/api/graphql"
+        payload = {
+            "variables": json.dumps({"shortcode": shortcode}),
+            "doc_id": "10015901848480474"
+        }
+        g_headers = {
+            "User-Agent": HEADERS["User-Agent"],
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-IG-App-ID": "936619743392459",
+            "X-ASBD-ID": "129477",
+            "X-FB-LSD": "AVqbxe3J_YA"
+        }
+        g_resp = session.post(graphql_url, data=payload, headers=g_headers, timeout=15)
+        g_text = g_resp.text.replace('\\/', '/').replace('\\u0026', '&')
+        g_videos = re.findall(r'"video_url":"(https://[^"]+\.mp4[^"]*)"', g_text)
+        if g_videos:
+            return g_videos[0]
+    except Exception:
+        pass
+
+    return None
+
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({"status": "Backend is running"})
@@ -59,13 +104,19 @@ def download():
 
     final_url = raw_url
 
-    # Check Pinterest first
+    # 1. Pinterest Handler
     if "pin.it" in raw_url or "pinterest." in raw_url:
         final_url, direct_mp4 = resolve_pinterest(raw_url)
         if direct_mp4:
             return jsonify({"download_url": direct_mp4, "title": "Pinterest Video"})
 
-    # Fallback / Instagram via yt-dlp
+    # 2. Instagram Handler (Embed + GraphQL before yt-dlp)
+    if "instagram.com" in raw_url:
+        insta_mp4 = resolve_instagram(raw_url)
+        if insta_mp4:
+            return jsonify({"download_url": insta_mp4, "title": "Instagram Video"})
+
+    # 3. Fallback via yt-dlp
     ydl_opts = {
         'format': 'best[ext=mp4]/best',
         'quiet': True,
